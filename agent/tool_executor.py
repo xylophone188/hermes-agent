@@ -636,7 +636,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
 
         if not blocked and agent.tool_complete_callback:
             try:
-                agent.tool_complete_callback(tc.id, name, args, function_result)
+                agent.tool_complete_callback(tc.id, name, args, function_result, duration=tool_duration)
             except Exception as cb_err:
                 logging.debug(f"Tool complete callback error: {cb_err}")
 
@@ -1174,7 +1174,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
 
         if not _execution_blocked and agent.tool_complete_callback:
             try:
-                agent.tool_complete_callback(tool_call.id, function_name, function_args, function_result)
+                agent.tool_complete_callback(tool_call.id, function_name, function_args, function_result, duration=tool_duration)
             except Exception as cb_err:
                 logging.debug(f"Tool complete callback error: {cb_err}")
 

@@ -12709,6 +12709,54 @@ class GatewayRunner:
                     except Exception as e:
                         logger.warning("Background task vision enrichment failed: %s", e)
 
+            # Build a per-tool-call progress callback that pushes a lightweight
+            # status line back to the originating chat while the background
+            # agent is still running.  This lets the user see forward motion
+            # without waiting for the full response.
+            #
+            # The callback runs inside the background thread (not the event
+            # loop thread), so we use safe_schedule_threadsafe to schedule the
+            # coroutine on the running loop.  Errors are swallowed — a failed
+            # progress ping must never abort the agent.
+            #
+            # Rate-limit: skip progress pings for ultra-fast tool calls
+            # (< PROGRESS_MIN_DURATION_S) so we don't flood the chat with
+            # trivial "todo ✅ 0.0s" messages.
+            _PROGRESS_MIN_DURATION_S = float(
+                os.environ.get("HERMES_BG_PROGRESS_MIN_S", "1.5")
+            )
+            _bg_loop = asyncio.get_event_loop()
+            _bg_tool_count = [0]  # mutable counter visible in closure
+
+            def _background_tool_complete_cb(
+                tool_call_id: str,
+                tool_name: str,
+                tool_args: dict,
+                tool_result: str,
+                duration: float = 0.0,
+            ) -> None:
+                """Push a progress ping to chat after each tool call."""
+                if duration < _PROGRESS_MIN_DURATION_S:
+                    return
+                _bg_tool_count[0] += 1
+                try:
+                    from agent.display import get_cute_tool_message
+                    cute = get_cute_tool_message(tool_name, tool_args, duration, result=tool_result)
+                except Exception:
+                    cute = f"{tool_name} ({duration:.1f}s)"
+                progress_text = f"⏳ [{task_id}] #{_bg_tool_count[0]} {cute}"
+                try:
+                    safe_schedule_threadsafe(
+                        adapter.send(
+                            source.chat_id,
+                            progress_text,
+                            metadata=_thread_metadata,
+                        ),
+                        _bg_loop,
+                    )
+                except Exception as _cb_err:
+                    logger.debug("Background progress send failed: %s", _cb_err)
+
             def run_sync():
                 agent = AIAgent(
                     model=turn_route["model"],
@@ -12738,6 +12786,7 @@ class GatewayRunner:
                     thread_id=source.thread_id,
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
+                    tool_complete_callback=_background_tool_complete_cb,
                 )
                 try:
                     return agent.run_conversation(
@@ -16217,7 +16266,7 @@ class GatewayRunner:
         "honcho.runtime_peer_prefix",
         "honcho.user_peer_aliases",
     )
-    _HONCHO_CACHE_BUSTING_MEMO: dict[tuple[str, int | None], dict[str, Any]] = {}
+    _HONCHO_CACHE_BUSTING_MEMO: dict[tuple[str, int | None, int | None], dict[str, Any]] = {}
 
     @classmethod
     def _empty_honcho_cache_busting_config(cls) -> dict[str, Any]:
@@ -16231,10 +16280,13 @@ class GatewayRunner:
 
             path = resolve_config_path()
             try:
-                mtime_ns = path.stat().st_mtime_ns
+                stat = path.stat()
+                mtime_ns = stat.st_mtime_ns
+                size = stat.st_size
             except OSError:
                 mtime_ns = None
-            memo_key = (str(path), mtime_ns)
+                size = None
+            memo_key = (str(path), mtime_ns, size)
             cached = cls._HONCHO_CACHE_BUSTING_MEMO.get(memo_key)
             if cached is not None:
                 return dict(cached)
