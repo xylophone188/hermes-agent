@@ -304,6 +304,31 @@ TASK_COMPLETION_GUIDANCE = (
     "is always better than inventing a result."
 )
 
+# Universal action-mode guidance — injected for ALL models, all sessions with tools.
+# Replaces the bad habit of reflexively asking clarifying questions before acting.
+# Three failure modes targeted:
+#   1. Asking "what do you want me to do?" when the request has an obvious interpretation.
+#   2. Asking for confirmation before using tools that would trivially resolve the ambiguity.
+#   3. Prefacing every response with "Sure, I can help — what exactly did you mean by…"
+# Config gate: agent.action_mode_guidance (default true).
+ACTION_MODE_GUIDANCE = (
+    "# Act first, ask only when genuinely blocked\n"
+    "Default to executing immediately. Do NOT ask clarifying questions before acting "
+    "unless the ambiguity would cause you to call a fundamentally different tool or "
+    "take a destructive/irreversible action. When in doubt, pick the most reasonable "
+    "interpretation, act on it, and state your assumption in one sentence.\n"
+    "Specifically:\n"
+    "- If a task can be attempted with available tools, attempt it — do not ask for permission.\n"
+    "- If information is missing but retrievable via tools (search_files, read_file, "
+    "web_search, terminal), retrieve it — do not ask the user.\n"
+    "- If the request is ambiguous but has a clearly dominant interpretation, use it.\n"
+    "- Only ask when: (a) you have no tools that could resolve the ambiguity, AND "
+    "(b) guessing wrong would be irreversible (e.g. deleting files, sending messages, "
+    "billing operations).\n"
+    "Never open a response with a question. If you must ask, act first, then ask about "
+    "the next step at the end."
+)
+
 # OpenAI GPT/Codex-specific execution guidance.  Addresses known failure modes
 # where GPT models abandon work on partial results, skip prerequisite lookups,
 # hallucinate instead of using tools, and declare "done" without verification.

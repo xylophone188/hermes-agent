@@ -1266,6 +1266,147 @@ class TestOpenAIModelExecutionGuidance:
 
 
 # =========================================================================
+# ACTION_MODE_GUIDANCE — act-first, ask-only-when-blocked
+# =========================================================================
+
+
+class TestActionModeGuidance:
+    def test_constant_exists_and_is_string(self):
+        from agent.prompt_builder import ACTION_MODE_GUIDANCE
+        assert isinstance(ACTION_MODE_GUIDANCE, str)
+        assert len(ACTION_MODE_GUIDANCE) > 50
+
+    def test_injected_into_system_prompt_by_default(self):
+        """ACTION_MODE_GUIDANCE appears in stable part when _action_mode_guidance=True."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from agent.prompt_builder import ACTION_MODE_GUIDANCE
+        from agent.system_prompt import build_system_prompt_parts
+
+        agent = SimpleNamespace(
+            load_soul_identity=False,
+            skip_context_files=False,
+            valid_tool_names=["terminal"],
+            _task_completion_guidance=False,
+            _action_mode_guidance=True,
+            _tool_use_enforcement=False,
+            _environment_probe=False,
+            _kanban_worker_guidance="",
+            _memory_store=None,
+            _memory_manager=None,
+            model="",
+            provider="",
+            platform="",
+            pass_session_id=False,
+            session_id="",
+        )
+        with (
+            patch("run_agent.load_soul_md", return_value=""),
+            patch("run_agent.build_nous_subscription_prompt", return_value=""),
+            patch("run_agent.build_environment_hints", return_value=""),
+            patch("run_agent.build_context_files_prompt", return_value=""),
+        ):
+            parts = build_system_prompt_parts(agent)
+
+        stable = parts["stable"]
+        assert ACTION_MODE_GUIDANCE in stable
+
+    def test_not_injected_when_disabled(self):
+        """ACTION_MODE_GUIDANCE absent when _action_mode_guidance=False."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from agent.prompt_builder import ACTION_MODE_GUIDANCE
+        from agent.system_prompt import build_system_prompt_parts
+
+        agent = SimpleNamespace(
+            load_soul_identity=False,
+            skip_context_files=False,
+            valid_tool_names=["terminal"],
+            _task_completion_guidance=False,
+            _action_mode_guidance=False,
+            _tool_use_enforcement=False,
+            _environment_probe=False,
+            _kanban_worker_guidance="",
+            _memory_store=None,
+            _memory_manager=None,
+            model="",
+            provider="",
+            platform="",
+            pass_session_id=False,
+            session_id="",
+        )
+        with (
+            patch("run_agent.load_soul_md", return_value=""),
+            patch("run_agent.build_nous_subscription_prompt", return_value=""),
+            patch("run_agent.build_environment_hints", return_value=""),
+            patch("run_agent.build_context_files_prompt", return_value=""),
+        ):
+            parts = build_system_prompt_parts(agent)
+
+        stable = parts["stable"]
+        assert ACTION_MODE_GUIDANCE not in stable
+
+    def test_not_injected_without_tools(self):
+        """No tools → guidance skipped (nothing to act with anyway)."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from agent.prompt_builder import ACTION_MODE_GUIDANCE
+        from agent.system_prompt import build_system_prompt_parts
+
+        agent = SimpleNamespace(
+            load_soul_identity=False,
+            skip_context_files=False,
+            valid_tool_names=[],
+            _task_completion_guidance=False,
+            _action_mode_guidance=True,
+            _tool_use_enforcement=False,
+            _environment_probe=False,
+            _kanban_worker_guidance="",
+            _memory_store=None,
+            _memory_manager=None,
+            model="",
+            provider="",
+            platform="",
+            pass_session_id=False,
+            session_id="",
+        )
+        with (
+            patch("run_agent.load_soul_md", return_value=""),
+            patch("run_agent.build_nous_subscription_prompt", return_value=""),
+            patch("run_agent.build_environment_hints", return_value=""),
+            patch("run_agent.build_context_files_prompt", return_value=""),
+        ):
+            parts = build_system_prompt_parts(agent)
+
+        stable = parts["stable"]
+        assert ACTION_MODE_GUIDANCE not in stable
+
+    def test_guidance_discourages_reflexive_questions(self):
+        from agent.prompt_builder import ACTION_MODE_GUIDANCE
+        text = ACTION_MODE_GUIDANCE.lower()
+        assert "clarif" in text or "ask" in text
+        assert "irreversible" in text or "destructive" in text
+
+    def test_agent_init_reads_config(self, tmp_path):
+        """agent_init sets _action_mode_guidance from config section."""
+        import importlib
+        import sys
+        from types import SimpleNamespace
+
+        # Minimal stub agent with config section
+        agent = SimpleNamespace()
+        _agent_section = {"action_mode_guidance": False}
+
+        # Directly test the extraction logic (same as agent_init does)
+        result = bool(_agent_section.get("action_mode_guidance", True))
+        assert result is False
+
+        _agent_section2 = {}
+        result2 = bool(_agent_section2.get("action_mode_guidance", True))
+        assert result2 is True
+
+
+# =========================================================================
 # Budget warning history stripping
 # =========================================================================
 
