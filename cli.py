@@ -9883,7 +9883,7 @@ class HermesCLI:
 
         # Wire delegate_fn: use delegate_task from tools with routing_metadata support
         from tools.delegate_tool import delegate_task as _delegate
-        import json as _json
+        from agent import WorkflowError as _WorkflowError
 
         _artifacts: dict[str, Any] = {}
 
@@ -9893,22 +9893,60 @@ class HermesCLI:
         def _load(node_id: str) -> Any:
             return _artifacts.get(node_id)
 
+        _dag_labels = {
+            "architect": "🏗  architect",
+            "planner": "📋  planner",
+            "researcher": "🔍  researcher",
+            "executor": "⚙️   executor",
+            "reviewer": "🔎  reviewer",
+            "synthesizer": "📝  synthesizer",
+        }
+
+        def _on_node_start(node_id: str, spec: Any) -> None:
+            label = _dag_labels.get(node_id, node_id)
+            _cprint(f"  → {label} …")
+
+        def _on_node_done(node_id: str, result: Any) -> None:
+            label = _dag_labels.get(node_id, node_id)
+            if result.status == "failed":
+                _cprint(f"  ✗ {label} failed ({result.error})")
+            elif result.status == "retried":
+                _cprint(f"  ✓ {label} (retried {result.attempts}x)")
+            else:
+                _cprint(f"  ✓ {label}")
+
+        def _delegate_with_agent(goal: str, routing_metadata: Any = None, **kwargs: Any) -> Any:
+            """Wrap delegate_task so it receives parent_agent from closure."""
+            return _delegate(
+                goal=goal,
+                routing_metadata=routing_metadata,
+                parent_agent=self.agent,
+                **kwargs,
+            )
+
         orchestrator = WorkflowOrchestrator(
-            delegate_fn=_delegate,
+            delegate_fn=_delegate_with_agent,
             persist_fn=_persist,
             load_fn=_load,
+            on_node_start=_on_node_start,
+            on_node_done=_on_node_done,
         )
 
-        _cprint(f"\n  🔄 Running workflow for: \"{task[:80]}{'...' if len(task) > 80 else ''}\"")
-        _cprint(f"     DAG: architect → planner → [researcher, executor] → reviewer → synthesizer\n")
+        _cprint(f"\n  🔄 Running workflow: \"{task[:80]}{'...' if len(task) > 80 else ''}\"")
+        _cprint(f"     architect → planner → researcher → executor → reviewer → synthesizer\n")
 
         try:
             result = orchestrator.run(workflow, {"task": task})
             _cprint(f"\n  ✅ Workflow complete.")
-            if isinstance(result, dict) and "summary" in result:
-                _cprint(f"  Summary: {result['summary'][:200]}")
+            if isinstance(result, dict):
+                if "summary" in result:
+                    _cprint(f"\n  Summary: {result['summary'][:300]}")
                 if "next_action" in result:
-                    _cprint(f"  Next: {result['next_action']}")
+                    _cprint(f"  Next:    {result['next_action']}")
+                if _artifacts:
+                    _cprint(f"\n  Artifacts: {list(_artifacts.keys())}")
+        except _WorkflowError as exc:
+            _cprint(f"\n  ❌ Workflow aborted: {exc}")
         except Exception as exc:
             _cprint(f"\n  ❌ Workflow failed: {exc}")
 

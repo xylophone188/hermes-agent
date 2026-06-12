@@ -217,7 +217,8 @@ class TestRoutingAndWorkflow(unittest.TestCase):
 
         def fake_delegate(goal, context=None, routing_metadata=None, **kwargs):
             calls.append((goal, context, routing_metadata))
-            return {"summary": goal, "next_action": "done"}
+            node_id = (routing_metadata or {}).get("agent_spec", {}).get("agent_id", "unknown")
+            return {"summary": node_id, "next_action": "done", "artifacts": []}
 
         persisted = []
         orch = WorkflowOrchestrator(

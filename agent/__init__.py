@@ -13,4 +13,4 @@ from .validation import (
     validate_output_contract,
     validate_routing_envelope,
 )
-from .workflow_orchestrator import WorkflowNode, WorkflowOrchestrator
+from .workflow_orchestrator import WorkflowNode, WorkflowOrchestrator, WorkflowError

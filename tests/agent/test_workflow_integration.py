@@ -207,9 +207,10 @@ class TestWorkflowOrchestratorIntegration(unittest.TestCase):
 
         def fake_delegate(goal, context=None, routing_metadata=None, **kwargs):
             call_log.append({"goal": goal, "meta": routing_metadata})
-            if goal == "architect":
-                return {"nodes": [{"id": "n1"}], "edges": [{"from": "n1", "to": "n2"}]}
-            return {"summary": "done", "next_action": "ship"}
+            node_id = (routing_metadata or {}).get("agent_spec", {}).get("agent_id", goal)
+            if node_id == "architect":
+                return {"nodes": [{"id": "n1", "role": "planner", "inputs": ["intent-v1"], "outputs": ["summary-v1"]}], "edges": [{"from": "n1", "to": "n2"}], "gates": []}
+            return {"summary": "done", "next_action": "ship", "artifacts": []}
 
         artifacts = {}
 
@@ -252,10 +253,9 @@ class TestWorkflowOrchestratorIntegration(unittest.TestCase):
         result = orch.run(workflow, {"task": "build feature X"})
         self.assertEqual(result["summary"], "done")
         self.assertEqual(len(call_log), 2)
-        # First call is architect; second is planner
-        self.assertEqual(call_log[0]["goal"], "architect")
-        self.assertEqual(call_log[1]["goal"], "planner")
-        # Verify routing_metadata is passed through
+        # Verify routing_metadata is passed through (use agent_id, not raw goal string)
+        self.assertEqual(call_log[0]["meta"]["agent_spec"]["agent_id"], "architect")
+        self.assertEqual(call_log[1]["meta"]["agent_spec"]["agent_id"], "planner")
         self.assertEqual(call_log[0]["meta"]["agent_spec"]["agent_id"], "architect")
         self.assertEqual(call_log[0]["meta"]["output_contract"], "dag-spec-v1")
 
@@ -281,10 +281,13 @@ class TestWorkflowOrchestratorIntegration(unittest.TestCase):
                     "input_contract": "intent-v1",
                     "output_contract": "summary-v1",
                     "success_criteria": ["summary"],
+                    "failure_policy": "abort",
+                    "max_retries": 0,
                 },
             ],
         }
-        with self.assertRaises(ValueError):
+        from agent import WorkflowError
+        with self.assertRaises(WorkflowError):
             orch.run(workflow, {"task": "fail fast"})
 
     def test_full_6_node_dag(self):
@@ -294,24 +297,25 @@ class TestWorkflowOrchestratorIntegration(unittest.TestCase):
 
         def fake_delegate(goal, context=None, routing_metadata=None, **kwargs):
             nonlocal step
-            call_order.append(goal)
             spec = routing_metadata["agent_spec"]
+            node_id = spec["agent_id"]  # use agent_id, not goal string
+            call_order.append(node_id)
             lane = pick_lane(spec)
             step += 1
 
-            if goal == "architect":
-                return {"nodes": [{"id": "planner"}], "edges": []}
-            elif goal == "planner":
-                return {"tasks": [{"id": "t1", "title": "Implement X"}]}
-            elif goal == "researcher":
+            if node_id == "architect":
+                return {"nodes": [{"id": "planner", "role": "planner", "inputs": ["dag-spec-v1"], "outputs": ["work-pack-v1"]}], "edges": [{"from": "architect", "to": "planner"}], "gates": ["validate_dag"]}
+            elif node_id == "planner":
+                return {"tasks": [{"id": "t1", "title": "Implement X", "owner": "executor", "deps": []}]}
+            elif node_id == "researcher":
                 return {"sources": ["file:///x.py"], "claims": [{"claim": "c", "evidence": "e"}]}
-            elif goal == "executor":
-                return {"files_changed": ["x.py"], "commands_run": ["pytest"]}
-            elif goal == "reviewer":
-                return {"verdict": "pass", "evidence": [{"claim": "ok", "evidence": "tests pass"}]}
-            elif goal == "synthesizer":
-                return {"summary": "Feature X implemented and reviewed", "next_action": "merge"}
-            return {"summary": goal, "next_action": "done"}
+            elif node_id == "executor":
+                return {"files_changed": ["x.py"], "commands_run": ["pytest"], "summary": "done"}
+            elif node_id == "reviewer":
+                return {"verdict": "pass", "evidence": ["tests pass"]}
+            elif node_id == "synthesizer":
+                return {"summary": "Feature X implemented and reviewed", "next_action": "merge", "artifacts": ["x.py"]}
+            return {"summary": node_id, "next_action": "done", "artifacts": []}
 
         artifacts = {}
         orch = WorkflowOrchestrator(
