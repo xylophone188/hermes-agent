@@ -347,7 +347,18 @@ class WorkflowOrchestrator:
             "Escalating node '%s' to consultant (worker confidence=%.2f, status=%s)",
             node.id, worker_result.confidence, worker_result.status,
         )
-        return self._run_node(consultant_node, enriched_context, workflow_kind, original_task)
+        if self.on_node_start:
+            try:
+                self.on_node_start(consultant_node.id, consultant_node.agent_spec)
+            except Exception:
+                pass
+        result = self._run_node(consultant_node, enriched_context, workflow_kind, original_task)
+        if self.on_node_done:
+            try:
+                self.on_node_done(consultant_node.id, result)
+            except Exception:
+                pass
+        return result
 
     @staticmethod
     def _extract_summary(raw: Any) -> str | dict:
