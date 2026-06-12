@@ -11,6 +11,14 @@ from agent.validation import validate_output_contract
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────
+# Escalation — cheap worker runs first; if confidence < threshold
+# OR contract fails, re-run with consultant (intelligence) model.
+# ──────────────────────────────────────────────────────────
+CONSULTANT_THRESHOLD_CONFIDENCE: float = 0.7
+CONSULTANT_NODE_SUFFIX: str = "__consultant"
+
+
+# ──────────────────────────────────────────────────────────
 # Contract prompts — appended to each node's goal so the
 # model knows exactly what JSON shape to return.
 # ──────────────────────────────────────────────────────────
@@ -169,6 +177,8 @@ class WorkflowNode:
     success_criteria: list[str]
     failure_policy: str = "revise"
     max_retries: int = 2
+    confidence_threshold: float = 0.7
+    consultant_tier: str = "consultant"
 
 
 @dataclass
@@ -179,6 +189,7 @@ class NodeResult:
     raw_summary: str
     attempts: int = 1
     error: Optional[str] = None
+    confidence: float = 1.0
 
 
 class WorkflowOrchestrator:
@@ -280,6 +291,64 @@ class WorkflowOrchestrator:
             error=last_error,
         )
 
+    def _should_escalate(self, result: "NodeResult", node: "WorkflowNode") -> bool:
+        """Return True if the worker result warrants consultant escalation.
+
+        Triggers when:
+        - result.status == 'failed'  (all retries exhausted / contract failed)
+        - result.confidence < node.confidence_threshold
+        """
+        if result.status == "failed":
+            return True
+        if result.confidence < node.confidence_threshold:
+            return True
+        return False
+
+    def _run_consultant(
+        self,
+        node: "WorkflowNode",
+        task_context: Any,
+        workflow_kind: str,
+        original_task: str,
+        worker_result: "NodeResult",
+    ) -> "NodeResult":
+        """Re-run node with consultant (intelligence) model via routing_metadata override."""
+        consultant_spec = dict(node.agent_spec)
+        consultant_spec["tier"] = node.consultant_tier
+        # Force intelligence model for consultant lane
+        consultant_spec["_model_override"] = "intelligence"
+
+        consultant_node = WorkflowNode(
+            id=node.id + CONSULTANT_NODE_SUFFIX,
+            agent_spec=consultant_spec,
+            input_contract=node.input_contract,
+            output_contract=node.output_contract,
+            success_criteria=node.success_criteria,
+            failure_policy="abort",   # consultant failure → hard abort
+            max_retries=1,
+            confidence_threshold=0.0,  # no further escalation
+            consultant_tier=node.consultant_tier,
+        )
+
+        # Enrich context with worker attempt info
+        enriched_context: Any
+        if isinstance(task_context, dict):
+            enriched_context = dict(task_context)
+            enriched_context["_worker_result"] = {
+                "status": worker_result.status,
+                "error": worker_result.error,
+                "raw": worker_result.raw_summary[:500] if worker_result.raw_summary else "",
+                "confidence": worker_result.confidence,
+            }
+        else:
+            enriched_context = task_context
+
+        logger.info(
+            "Escalating node '%s' to consultant (worker confidence=%.2f, status=%s)",
+            node.id, worker_result.confidence, worker_result.status,
+        )
+        return self._run_node(consultant_node, enriched_context, workflow_kind, original_task)
+
     @staticmethod
     def _extract_summary(raw: Any) -> str | dict:
         """Extract structured output from delegate_task return value.
@@ -345,6 +414,13 @@ class WorkflowOrchestrator:
                     pass
 
             result = self._run_node(node, current_input, kind, original_task=original_task)
+
+            # Escalation gate: cheap worker first, consultant on low confidence or failure
+            if self._should_escalate(result, node):
+                result = self._run_consultant(
+                    node, current_input, kind, original_task, worker_result=result
+                )
+
             results.append(result)
 
             if self.on_node_done:

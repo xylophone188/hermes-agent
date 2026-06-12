@@ -2200,6 +2200,21 @@ def delegate_task(
     if routing_metadata is not None:
         validate_routing_envelope(routing_metadata)
 
+    # Derive model from routing_metadata.agent_spec.tier/capability when present.
+    # consultant/verifier tier → intelligence; all others → auto.
+    # This overrides delegation.model so each child gets the right 9router combo.
+    _routing_model: Optional[str] = None
+    if routing_metadata is not None:
+        _agent_spec = routing_metadata.get("agent_spec", {})
+        _tier = str(_agent_spec.get("tier") or "").lower()
+        _model_override = _agent_spec.get("_model_override")  # set by consultant escalation
+        if _model_override:
+            _routing_model = str(_model_override)
+        elif _tier in {"consultant", "verifier"}:
+            _routing_model = "intelligence"
+        elif _tier:
+            _routing_model = "auto"
+
     # Validate each task has a goal
     for i, task in enumerate(task_list):
         if not isinstance(task, dict):
@@ -2238,7 +2253,7 @@ def delegate_task(
                 goal=t["goal"],
                 context=t.get("context"),
                 toolsets=t.get("toolsets") or toolsets,
-                model=creds["model"],
+                model=_routing_model or creds["model"],
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
                 parent_agent=parent_agent,

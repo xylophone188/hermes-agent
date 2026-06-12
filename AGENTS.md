@@ -217,6 +217,24 @@ if canonical == "mycommand":
 
 **Adding an alias** requires only adding it to the `aliases` tuple on the existing `CommandDef`. No other file changes needed — dispatch, help text, Telegram menu, Slack mapping, and autocomplete all update automatically.
 
+### `/workflow` Command
+
+`/workflow <task>` is the multi-agent DAG entrypoint.
+
+Shape:
+```text
+architect → planner → workers/research/execution → reviewer → synthesizer
+```
+
+Rules:
+- identity-first routing
+- node goals carry `ORIGINAL TASK` + `PRIOR OUTPUT`
+- child prompts inject JSON-only `output_contract`
+- orchestrator validates each stage before promotion
+- retry bounded; `failure_policy=abort` fails fast
+
+Use for structured decomposition, not ad-hoc chat.
+
 ---
 
 ## TUI Architecture (ui-tui + tui_gateway)
