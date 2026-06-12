@@ -164,6 +164,69 @@ class TestChildSystemPrompt(unittest.TestCase):
         self.assertIn("ROUTING_LANE=research", prompt)
         self.assertIn("ROUTING_OUTPUT_CONTRACT=evidence-pack-v1", prompt)
 
+    def test_contract_prompt_json_only_requirement(self):
+        """routing_metadata with output_contract → JSON-only prompt injected."""
+        prompt = _build_child_system_prompt(
+            "Do research",
+            routing_metadata={
+                "agent_spec": {
+                    "agent_id": "researcher",
+                    "role": "worker",
+                    "persona": "fact-finder",
+                    "capability": "research",
+                    "tier": "investigator",
+                    "depth": 0,
+                    "target_profile": "default",
+                    "output_contract": "evidence-pack-v1",
+                },
+                "output_contract": "evidence-pack-v1",
+            },
+        )
+        self.assertIn("CRITICAL OUTPUT REQUIREMENT", prompt)
+        self.assertIn("valid JSON object", prompt)
+        self.assertIn("evidence-pack-v1", prompt)
+        self.assertIn("sources", prompt)
+        self.assertIn("claims", prompt)
+        # generic summary text should NOT appear
+        self.assertNotIn("What you did", prompt)
+
+    def test_contract_prompt_all_contracts_have_schema(self):
+        """Every known contract produces a non-empty JSON requirement block."""
+        from tools.delegate_tool import _build_contract_prompt, _CONTRACT_SCHEMAS
+        for contract in _CONTRACT_SCHEMAS:
+            p = _build_contract_prompt(contract)
+            self.assertIn("CRITICAL OUTPUT REQUIREMENT", p, msg=f"Missing for {contract}")
+            self.assertIn("valid JSON", p, msg=f"Missing for {contract}")
+
+    def test_no_routing_metadata_uses_generic_summary(self):
+        """Without routing_metadata, generic summary block appears."""
+        prompt = _build_child_system_prompt("Just do it")
+        self.assertIn("What you did", prompt)
+        self.assertNotIn("CRITICAL OUTPUT REQUIREMENT", prompt)
+
+    def test_executor_contract_prompt(self):
+        """executor gets diff-pack-v1 prompt with files_changed requirement."""
+        prompt = _build_child_system_prompt(
+            "Implement feature",
+            routing_metadata={
+                "agent_spec": {
+                    "agent_id": "executor",
+                    "role": "worker",
+                    "persona": "code-implementer",
+                    "capability": "implementation",
+                    "tier": "executor",
+                    "depth": 0,
+                    "target_profile": "default",
+                    "output_contract": "diff-pack-v1",
+                },
+                "output_contract": "diff-pack-v1",
+            },
+        )
+        self.assertIn("files_changed", prompt)
+        self.assertIn("commands_run", prompt)
+        self.assertIn("Implement", prompt)
+        self.assertNotIn("What you did", prompt)
+
 
 class TestStripBlockedTools(unittest.TestCase):
     def test_removes_blocked_toolsets(self):
