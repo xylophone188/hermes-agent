@@ -258,6 +258,10 @@ class TestWorkflowOrchestratorIntegration(unittest.TestCase):
         self.assertEqual(call_log[1]["meta"]["agent_spec"]["agent_id"], "planner")
         self.assertEqual(call_log[0]["meta"]["agent_spec"]["agent_id"], "architect")
         self.assertEqual(call_log[0]["meta"]["output_contract"], "dag-spec-v1")
+        self.assertIn("ORIGINAL TASK", call_log[0]["goal"])
+        self.assertIn("build feature X", call_log[0]["goal"])
+        self.assertIn("PRIOR OUTPUT", call_log[1]["goal"])
+        self.assertIn("nodes", call_log[1]["goal"])
 
     def test_contract_validation_blocks_bad_output(self):
         """If a node produces invalid output, ValueError is raised."""

@@ -117,22 +117,43 @@ def _build_node_goal(
     agent_spec: dict[str, Any],
     task_context: Any,
     output_contract: str,
+    original_task: str = "",
 ) -> str:
-    """Build the full goal string for a node, including role prompt + contract."""
+    """Build the full goal string for a node, including role prompt + contract.
+
+    Structure:
+      1. Role-specific instruction (what this agent does / doesn't do)
+      2. ORIGINAL TASK anchor (always present so model keeps focus)
+      3. INPUT from prior node (empty on first node)
+      4. OUTPUT CONTRACT schema (JSON-only requirement)
+    """
     role = agent_spec.get("role", node_id)
-    role_prompt = _ROLE_PROMPTS.get(role, "")
+    role_prompt = _ROLE_PROMPTS.get(node_id) or _ROLE_PROMPTS.get(role, "")
     contract_prompt = _CONTRACT_PROMPTS.get(output_contract, "")
 
-    # Serialise context
-    if isinstance(task_context, dict):
-        ctx_str = json.dumps(task_context, ensure_ascii=False, indent=2)
-    else:
-        ctx_str = str(task_context)
+    parts: list[str] = []
 
-    parts = []
     if role_prompt:
         parts.append(role_prompt)
-    parts.append(f"\n\nINPUT:\n{ctx_str}")
+
+    # Always anchor to the original user task
+    if original_task:
+        parts.append(f"\n\nORIGINAL TASK:\n{original_task}")
+
+    # Serialise upstream context (only if it adds info beyond the task itself)
+    if task_context:
+        if isinstance(task_context, dict):
+            # If it's just the initial {"task": ...} wrapper, skip — already shown above
+            if set(task_context.keys()) == {"task"}:
+                ctx_str = None
+            else:
+                ctx_str = json.dumps(task_context, ensure_ascii=False, indent=2)
+        else:
+            ctx_str = str(task_context).strip() or None
+
+        if ctx_str:
+            parts.append(f"\n\nPRIOR OUTPUT (from upstream node):\n{ctx_str}")
+
     if contract_prompt:
         parts.append(contract_prompt)
 
@@ -180,6 +201,7 @@ class WorkflowOrchestrator:
         node: WorkflowNode,
         task_context: Any,
         workflow_kind: str,
+        original_task: str = "",
     ) -> NodeResult:
         """Run a single node with retry. Returns NodeResult."""
         spec = node.agent_spec
@@ -191,6 +213,7 @@ class WorkflowOrchestrator:
                 agent_spec=spec,
                 task_context=task_context,
                 output_contract=node.output_contract,
+                original_task=original_task,
             )
 
             # If retrying, add error feedback
@@ -306,6 +329,12 @@ class WorkflowOrchestrator:
         results: list[NodeResult] = []
         kind = workflow.get("kind", "workflow")
 
+        # Extract original task string — carried through every node for context anchoring
+        if isinstance(initial_input, dict):
+            original_task = str(initial_input.get("task", ""))
+        else:
+            original_task = str(initial_input or "")
+
         for node_data in workflow["nodes"]:
             node = WorkflowNode(**node_data)
 
@@ -315,7 +344,7 @@ class WorkflowOrchestrator:
                 except Exception:
                     pass
 
-            result = self._run_node(node, current_input, kind)
+            result = self._run_node(node, current_input, kind, original_task=original_task)
             results.append(result)
 
             if self.on_node_done:
