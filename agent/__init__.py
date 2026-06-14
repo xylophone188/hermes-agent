@@ -6,3 +6,12 @@ them makes run_agent.py focused on the AIAgent orchestrator class.
 """
 
 from . import jiter_preload as _jiter_preload  # noqa: F401
+
+from .agent_spec import AgentSpec, RoutingEnvelope
+from .routing import pick_lane, pick_route
+from .validation import (
+    validate_agent_spec,
+    validate_output_contract,
+    validate_routing_envelope,
+)
+from .workflow_orchestrator import WorkflowNode, WorkflowOrchestrator, WorkflowError

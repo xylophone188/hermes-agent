@@ -7528,6 +7528,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             self._handle_bundles_command(cmd_original)
         elif canonical == "browser":
             self._handle_browser_command(cmd_original)
+        elif canonical == "workflow":
+            self._handle_workflow_command(cmd_original)
         elif canonical == "plugins":
             try:
                 # Discover from disk (bundled + user), matching `hermes plugins
@@ -8844,6 +8846,198 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
         except Exception as e:
             print(f"  ❌ MCP reload failed: {e}")
+
+    def _handle_workflow_command(self, cmd: str) -> None:
+        """Handle /workflow <task> — run a multi-agent workflow DAG.
+
+        Default DAG:
+          architect (consultant, dag-spec-v1) → planner (consultant, work-pack-v1)
+          → [researcher + executor] (workers) → reviewer (verifier, review-report-v1)
+          → synthesizer (summarizer, summary-v1)
+
+        Each node's output contract is validated before the next node runs.
+        """
+        parts = (cmd or "").strip().split(None, 1)
+        task = parts[1].strip() if len(parts) > 1 else ""
+        if not task:
+            _cprint("  Usage: /workflow <task>")
+            _cprint("  Example: /workflow Add JWT authentication to the API")
+            return
+
+        from agent import WorkflowOrchestrator
+        from agent.agent_spec import AgentSpec
+
+        # Build the default 6-node DAG inline
+        workflow = {
+            "kind": "identity-routing",
+            "nodes": [
+                {
+                    "id": "architect",
+                    "agent_spec": AgentSpec(
+                        agent_id="architect",
+                        role="architect",
+                        persona="systems-architect",
+                        capability="workflow-design",
+                        tier="consultant",
+                        depth=0,
+                        target_profile="default",
+                        output_contract="dag-spec-v1",
+                    ).to_dict(),
+                    "input_contract": "intent-v1",
+                    "output_contract": "dag-spec-v1",
+                    "success_criteria": ["nodes", "edges"],
+                },
+                {
+                    "id": "planner",
+                    "agent_spec": AgentSpec(
+                        agent_id="planner",
+                        role="planner",
+                        persona="task-decomposer",
+                        capability="task-planning",
+                        tier="consultant",
+                        depth=0,
+                        target_profile="default",
+                        output_contract="work-pack-v1",
+                    ).to_dict(),
+                    "input_contract": "dag-spec-v1",
+                    "output_contract": "work-pack-v1",
+                    "success_criteria": ["tasks"],
+                },
+                {
+                    "id": "researcher",
+                    "agent_spec": AgentSpec(
+                        agent_id="researcher",
+                        role="worker",
+                        persona="fact-finder",
+                        capability="research",
+                        tier="investigator",
+                        depth=0,
+                        target_profile="default",
+                        output_contract="evidence-pack-v1",
+                    ).to_dict(),
+                    "input_contract": "work-pack-v1",
+                    "output_contract": "evidence-pack-v1",
+                    "success_criteria": ["sources", "claims"],
+                },
+                {
+                    "id": "executor",
+                    "agent_spec": AgentSpec(
+                        agent_id="executor",
+                        role="worker",
+                        persona="code-implementer",
+                        capability="implementation",
+                        tier="executor",
+                        depth=0,
+                        target_profile="default",
+                        output_contract="diff-pack-v1",
+                    ).to_dict(),
+                    "input_contract": "work-pack-v1",
+                    "output_contract": "diff-pack-v1",
+                    "success_criteria": ["files_changed", "commands_run"],
+                },
+                {
+                    "id": "reviewer",
+                    "agent_spec": AgentSpec(
+                        agent_id="reviewer",
+                        role="verifier",
+                        persona="strict-reviewer",
+                        capability="review",
+                        tier="verifier",
+                        depth=0,
+                        target_profile="default",
+                        output_contract="review-report-v1",
+                    ).to_dict(),
+                    "input_contract": "diff-pack-v1",
+                    "output_contract": "review-report-v1",
+                    "success_criteria": ["verdict", "evidence"],
+                },
+                {
+                    "id": "synthesizer",
+                    "agent_spec": AgentSpec(
+                        agent_id="synthesizer",
+                        role="synthesizer",
+                        persona="final-merger",
+                        capability="summary",
+                        tier="summarizer",
+                        depth=0,
+                        target_profile="default",
+                        output_contract="summary-v1",
+                    ).to_dict(),
+                    "input_contract": "review-report-v1",
+                    "output_contract": "summary-v1",
+                    "success_criteria": ["summary", "next_action"],
+                },
+            ],
+        }
+
+        # Wire delegate_fn: use delegate_task from tools with routing_metadata support
+        from tools.delegate_tool import delegate_task as _delegate
+        from agent import WorkflowError as _WorkflowError
+
+        _artifacts: dict[str, Any] = {}
+
+        def _persist(node_id: str, output: Any) -> None:
+            _artifacts[node_id] = output
+
+        def _load(node_id: str) -> Any:
+            return _artifacts.get(node_id)
+
+        _dag_labels = {
+            "architect": "🏗  architect",
+            "planner": "📋  planner",
+            "researcher": "🔍  researcher",
+            "executor": "⚙️   executor",
+            "reviewer": "🔎  reviewer",
+            "synthesizer": "📝  synthesizer",
+        }
+
+        def _on_node_start(node_id: str, spec: Any) -> None:
+            label = _dag_labels.get(node_id, node_id)
+            _cprint(f"  → {label} …")
+
+        def _on_node_done(node_id: str, result: Any) -> None:
+            label = _dag_labels.get(node_id, node_id)
+            if result.status == "failed":
+                _cprint(f"  ✗ {label} failed ({result.error})")
+            elif result.status == "retried":
+                _cprint(f"  ✓ {label} (retried {result.attempts}x)")
+            else:
+                _cprint(f"  ✓ {label}")
+
+        def _delegate_with_agent(goal: str, routing_metadata: Any = None, **kwargs: Any) -> Any:
+            """Wrap delegate_task so it receives parent_agent from closure."""
+            return _delegate(
+                goal=goal,
+                routing_metadata=routing_metadata,
+                parent_agent=self.agent,
+                **kwargs,
+            )
+
+        orchestrator = WorkflowOrchestrator(
+            delegate_fn=_delegate_with_agent,
+            persist_fn=_persist,
+            load_fn=_load,
+            on_node_start=_on_node_start,
+            on_node_done=_on_node_done,
+        )
+
+        _cprint(f"\n  🔄 Running workflow: \"{task[:80]}{'...' if len(task) > 80 else ''}\"")
+        _cprint(f"     architect → planner → researcher → executor → reviewer → synthesizer\n")
+
+        try:
+            result = orchestrator.run(workflow, {"task": task})
+            _cprint(f"\n  ✅ Workflow complete.")
+            if isinstance(result, dict):
+                if "summary" in result:
+                    _cprint(f"\n  Summary: {result['summary'][:300]}")
+                if "next_action" in result:
+                    _cprint(f"  Next:    {result['next_action']}")
+                if _artifacts:
+                    _cprint(f"\n  Artifacts: {list(_artifacts.keys())}")
+        except _WorkflowError as exc:
+            _cprint(f"\n  ❌ Workflow aborted: {exc}")
+        except Exception as exc:
+            _cprint(f"\n  ❌ Workflow failed: {exc}")
 
     def _reload_skills(self) -> None:
         """Reload skills: rescan ~/.hermes/skills/ and queue a note for the

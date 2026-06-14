@@ -27,6 +27,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 from agent.prompt_builder import (
+    ACTION_MODE_GUIDANCE,
     DEFAULT_AGENT_IDENTITY,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
     HERMES_AGENT_HELP_GUIDANCE,
@@ -110,6 +111,13 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # users who want a leaner prompt can turn it off.
     if getattr(agent, "_task_completion_guidance", True) and agent.valid_tool_names:
         stable_parts.append(TASK_COMPLETION_GUIDANCE)
+
+    # Universal action-mode guidance — all models, all sessions with tools.
+    # Kills the reflexive-clarification habit: agent acts first, asks only when
+    # genuinely blocked by irreversible ambiguity.
+    # Config gate: agent.action_mode_guidance (default true).
+    if getattr(agent, "_action_mode_guidance", True) and agent.valid_tool_names:
+        stable_parts.append(ACTION_MODE_GUIDANCE)
 
     # Tool-aware behavioral guidance: only inject when the tools are loaded
     tool_guidance = []

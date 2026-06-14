@@ -1217,6 +1217,14 @@ def init_agent(
     # targets.
     agent._task_completion_guidance = bool(_agent_section.get("task_completion_guidance", True))
 
+    # Action-mode guidance toggle.  Default True.  When enabled, injects
+    # ACTION_MODE_GUIDANCE into the stable system prompt for ALL models so the
+    # agent defaults to executing rather than reflexively asking clarifying
+    # questions.  Set agent.action_mode_guidance: false in config.yaml to
+    # disable (e.g. for interactive tutoring sessions where questioning is
+    # desirable).
+    agent._action_mode_guidance = bool(_agent_section.get("action_mode_guidance", True))
+
     # Local Python toolchain probe toggle.  Default True.  When False,
     # the probe is skipped entirely (no subprocess calls, no system-prompt
     # line).  Useful for users on exotic setups where the probe heuristics

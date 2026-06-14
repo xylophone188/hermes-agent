@@ -30,6 +30,8 @@ from concurrent.futures import (
 )
 from typing import Any, Dict, List, Optional
 
+from agent.routing import pick_route
+from agent.validation import validate_routing_envelope
 from toolsets import TOOLSETS
 
 # Sentinel value used by the runtime provider system for providers that are
@@ -621,6 +623,86 @@ def check_delegate_requirements() -> bool:
     return True
 
 
+_CONTRACT_SCHEMAS = {
+    "dag-spec-v1": (
+        '{"nodes": [{"id": str, "role": str, "inputs": [str], "outputs": [str]}], '
+        '"edges": [{"from": str, "to": str}], "gates": [str]}'
+    ),
+    "work-pack-v1": (
+        '{"tasks": [{"id": str, "title": str, "owner": str, "deps": [str]}]}'
+    ),
+    "evidence-pack-v1": (
+        '{"sources": [str], "claims": [{"claim": str, "evidence": str}]}'
+    ),
+    "diff-pack-v1": (
+        '{"files_changed": [str], "commands_run": [str], "summary": str}'
+    ),
+    "review-report-v1": (
+        '{"verdict": "pass"|"fail", "evidence": [str], "comments": [str]}'
+    ),
+    "summary-v1": (
+        '{"summary": str, "next_action": str, "artifacts": [str]}'
+    ),
+}
+
+_CONTRACT_PERSONAS = {
+    "dag-spec-v1": (
+        "Design the workflow DAG for the given task. "
+        "Do NOT implement anything. "
+        "Identify the logical stages, their roles, inputs, outputs, and gates."
+    ),
+    "work-pack-v1": (
+        "Decompose the DAG into concrete tasks. "
+        "Each task must have a clear owner role, title, and dependency list. "
+        "Do NOT implement — plan only."
+    ),
+    "evidence-pack-v1": (
+        "Research the task. Gather facts, code references, documentation, and prior art. "
+        "List your sources and specific claims with evidence. "
+        "Do NOT write code — research only."
+    ),
+    "diff-pack-v1": (
+        "Implement the task. Make the necessary file changes and run commands. "
+        "List every file you modified and every command you ran. "
+        "Do NOT review or plan — execute only."
+    ),
+    "review-report-v1": (
+        "Review the implementation. Check for correctness, security, and contract compliance. "
+        "Render a verdict of 'pass' or 'fail'. "
+        "Do NOT implement — review only."
+    ),
+    "summary-v1": (
+        "Synthesize all prior outputs into a final summary. "
+        "State what was done, what the outcome was, and what the next action is. "
+        "Do NOT implement or review — summarize only."
+    ),
+}
+
+
+def _build_contract_prompt(output_contract: str) -> str:
+    """Build the JSON-only output requirement block for a given output contract."""
+    schema = _CONTRACT_SCHEMAS.get(output_contract)
+    persona_note = _CONTRACT_PERSONAS.get(output_contract, "Complete the task.")
+
+    if not schema:
+        return (
+            f"Your output contract is: {output_contract}\n"
+            "When finished, provide a clear concise summary of what you did.\n"
+            "Be thorough but concise — your response is returned to the parent agent as a summary."
+        )
+
+    return (
+        f"YOUR ROLE: {persona_note}\n\n"
+        "CRITICAL OUTPUT REQUIREMENT:\n"
+        "You MUST respond with ONLY a valid JSON object — no prose, no markdown fences, "
+        "no explanation before or after.\n\n"
+        f"Required schema ({output_contract}):\n{schema}\n\n"
+        "If you cannot produce a valid JSON object matching this schema, "
+        "output an empty object that still contains the required keys with empty values. "
+        "Never output free-form text as your final response."
+    )
+
+
 def _build_child_system_prompt(
     goal: str,
     context: Optional[str] = None,
@@ -629,6 +711,7 @@ def _build_child_system_prompt(
     role: str = "leaf",
     max_spawn_depth: int = 2,
     child_depth: int = 1,
+    routing_metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Build a focused system prompt for a child agent.
 
@@ -651,18 +734,48 @@ def _build_child_system_prompt(
             f"{workspace_path}\n"
             "Use this exact path for local repository/workdir operations unless the task explicitly says otherwise."
         )
-    parts.append(
-        "\nComplete this task using the tools available to you. "
-        "When finished, provide a clear, concise summary of:\n"
-        "- What you did\n"
-        "- What you found or accomplished\n"
-        "- Any files you created or modified\n"
-        "- Any issues encountered\n\n"
-        "Important workspace rule: Never assume a repository lives at /workspace/... or any other container-style path unless the task/context explicitly gives that path. "
-        "If no exact local path is provided, discover it first before issuing git/workdir-specific commands.\n\n"
-        "Be thorough but concise -- your response is returned to the "
-        "parent agent as a summary."
-    )
+    if routing_metadata:
+        spec = routing_metadata.get("agent_spec") or {}
+        output_contract = routing_metadata.get("output_contract") or spec.get("output_contract", "")
+        if spec:
+            # Role-specific identity + JSON-only output requirement
+            persona = spec.get("persona", spec.get("role", "worker"))
+            agent_id = spec.get("agent_id", "agent")
+            route = pick_route(spec)
+
+            # Replace generic summary with contract-specific requirement
+            contract_prompt = _build_contract_prompt(output_contract)
+            parts.append(
+                f"\nYou are a {persona} (agent_id={agent_id}, tier={spec.get('tier','worker')}, "
+                f"routing_lane={route['lane']}).\n"
+                f"Complete this task using the tools available to you.\n\n"
+                "Important workspace rule: Never assume a repository lives at /workspace/... "
+                "unless the task/context explicitly gives that path.\n\n"
+                + contract_prompt
+            )
+            # Append AGENT_SPEC block for traceability
+            parts.append("\n[AGENT_SPEC]")
+            for key in (
+                "agent_id", "role", "persona", "capability",
+                "tier", "depth", "target_profile", "output_contract",
+            ):
+                if key in spec and spec[key] is not None:
+                    parts.append(f"{key}={spec[key]}")
+            parts.append(f"ROUTING_LANE={route['lane']}")
+            parts.append(f"ROUTING_OUTPUT_CONTRACT={route['output_contract']}")
+    else:
+        parts.append(
+            "\nComplete this task using the tools available to you. "
+            "When finished, provide a clear, concise summary of:\n"
+            "- What you did\n"
+            "- What you found or accomplished\n"
+            "- Any files you created or modified\n"
+            "- Any issues encountered\n\n"
+            "Important workspace rule: Never assume a repository lives at /workspace/... or any other container-style path unless the task/context explicitly gives that path. "
+            "If no exact local path is provided, discover it first before issuing git/workdir-specific commands.\n\n"
+            "Be thorough but concise -- your response is returned to the "
+            "parent agent as a summary."
+        )
     if role == "orchestrator":
         child_note = (
             "Your own children MUST be leaves (cannot delegate further) "
@@ -949,6 +1062,7 @@ def _build_child_agent(
     # 'leaf' (default) cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
     role: str = "leaf",
+    routing_metadata: Optional[Dict[str, Any]] = None,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -961,6 +1075,9 @@ def _build_child_agent(
     """
     from run_agent import AIAgent
     import uuid as _uuid
+
+    if routing_metadata is not None:
+        validate_routing_envelope(routing_metadata)
 
     # ── Role resolution ─────────────────────────────────────────────────
     # Honor the caller's role only when BOTH the kill switch and the
@@ -1036,6 +1153,7 @@ def _build_child_agent(
         role=effective_role,
         max_spawn_depth=max_spawn,
         child_depth=child_depth,
+        routing_metadata=routing_metadata,
     )
     # Extract parent's API key so subagents inherit auth (e.g. Nous Portal).
     parent_api_key = getattr(parent_agent, "api_key", None)
@@ -2019,6 +2137,7 @@ def delegate_task(
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
     parent_agent=None,
+    routing_metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Spawn one or more child agents to handle delegated tasks.
@@ -2120,6 +2239,24 @@ def delegate_task(
     if not task_list:
         return tool_error("No tasks provided.")
 
+    if routing_metadata is not None:
+        validate_routing_envelope(routing_metadata)
+
+    # Derive model from routing_metadata.agent_spec.tier/capability when present.
+    # consultant/verifier tier → intelligence; all others → auto.
+    # This overrides delegation.model so each child gets the right 9router combo.
+    _routing_model: Optional[str] = None
+    if routing_metadata is not None:
+        _agent_spec = routing_metadata.get("agent_spec", {})
+        _tier = str(_agent_spec.get("tier") or "").lower()
+        _model_override = _agent_spec.get("_model_override")  # set by consultant escalation
+        if _model_override:
+            _routing_model = str(_model_override)
+        elif _tier in {"consultant", "verifier"}:
+            _routing_model = "intelligence"
+        elif _tier:
+            _routing_model = "auto"
+
     # Validate each task has a goal
     for i, task in enumerate(task_list):
         if not isinstance(task, dict):
@@ -2158,7 +2295,7 @@ def delegate_task(
                 goal=t["goal"],
                 context=t.get("context"),
                 toolsets=t.get("toolsets") or toolsets,
-                model=creds["model"],
+                model=_routing_model or creds["model"],
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
                 parent_agent=parent_agent,
@@ -2175,6 +2312,7 @@ def delegate_task(
                     else (acp_args if acp_args is not None else creds.get("args"))
                 ),
                 role=effective_role,
+                routing_metadata=routing_metadata,
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names

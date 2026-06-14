@@ -7359,6 +7359,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if canonical == "background":
             return await self._handle_background_command(event)
 
+        if canonical == "workflow":
+            return await self._handle_workflow_command(event)
+
         if canonical == "steer":
             # No active agent — /steer has no tool call to inject into.
             # Strip the prefix so downstream treats it as a normal user
@@ -7623,6 +7626,239 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # inside _run_agent returns False, and the old sentinel-only check here
             # missed the leftover real agent — locking the session out forever (#28686).
             self._release_running_agent_state(_quick_key)
+
+    async def _handle_workflow_command(self, event: MessageEvent) -> str:
+        """Handle /workflow <task> — run a multi-agent workflow DAG.
+
+        Spawns a 6-node DAG (architect → planner → researcher → executor
+        → reviewer → synthesizer) in a background thread and streams
+        per-node progress back to the chat.
+        """
+        args = event.get_command_args().strip()
+        if not args:
+            return "Usage: /workflow <task>"
+
+        source = event.source
+        task_id = f"wf_{datetime.now().strftime('%H%M%S')}_{os.urandom(3).hex()}"
+        event_message_id = self._reply_anchor_for_event(event)
+
+        _task = asyncio.create_task(
+            self._run_workflow_task(
+                task=args,
+                source=source,
+                task_id=task_id,
+                event_message_id=event_message_id,
+            )
+        )
+        self._background_tasks.add(_task)
+        _task.add_done_callback(self._background_tasks.discard)
+
+        return f"🌟 Workflow started (ID: {task_id})\nTask: {args[:80]}"
+
+    async def _run_workflow_task(
+        self,
+        task: str,
+        source: "SessionSource",
+        task_id: str,
+        event_message_id: Optional[str] = None,
+    ) -> None:
+        """Execute a 6-node workflow DAG and deliver results to chat."""
+        from agent.workflow_orchestrator import WorkflowOrchestrator
+        from agent.agent_spec import AgentSpec
+        from tools.delegate_tool import delegate_task
+
+        adapter = self.adapters.get(source.platform)
+        if not adapter:
+            return
+
+        _thread_metadata = self._thread_metadata_for_source(source, event_message_id)
+
+        # --- node progress callbacks ---
+        _wf_loop = asyncio.get_event_loop()
+
+        def _on_node_start(node_id: str, spec: dict) -> None:
+            labels = {
+                "architect": "🔷 ARCH",
+                "planner": "📝 PLAN",
+                "researcher": "🔍 RESEARCH",
+                "executor": "⚡ EXEC",
+                "reviewer": "✅ REVIEW",
+                "synthesizer": "🎯 SYNTH",
+            }
+            label = labels.get(node_id, node_id)
+            try:
+                safe_schedule_threadsafe(
+                    adapter.send(
+                        source.chat_id,
+                        f"▶️ {label} starting…",
+                        metadata=_thread_metadata,
+                    ),
+                    _wf_loop,
+                )
+            except Exception:
+                pass
+
+        def _on_node_done(node_id: str, result: dict) -> None:
+            labels = {
+                "architect": "🔷 ARCH",
+                "planner": "📝 PLAN",
+                "researcher": "🔍 RESEARCH",
+                "executor": "⚡ EXEC",
+                "reviewer": "✅ REVIEW",
+                "synthesizer": "🎯 SYNTH",
+            }
+            label = labels.get(node_id, node_id)
+            ok = not result.get("error")
+            status = "✅" if ok else "❌"
+            try:
+                safe_schedule_threadsafe(
+                    adapter.send(
+                        source.chat_id,
+                        f"{status} {label} done" + (f" ({result['error']})" if not ok else ""),
+                        metadata=_thread_metadata,
+                    ),
+                    _wf_loop,
+                )
+            except Exception:
+                pass
+
+        # --- build default 6-node DAG ---
+        dag = {
+            "kind": "identity-routing",
+            "nodes": [
+                {
+                    "id": "architect",
+                    "agent_spec": AgentSpec(
+                        agent_id="architect",
+                        role="architect",
+                        persona="systems-architect",
+                        capability="workflow-design",
+                        tier="consultant",
+                        depth=0,
+                        target_profile="default",
+                        output_contract="dag-spec-v1",
+                    ).to_dict(),
+                    "input_contract": "intent-v1",
+                    "output_contract": "dag-spec-v1",
+                    "success_criteria": ["nodes", "edges", "gates"],
+                },
+                {
+                    "id": "planner",
+                    "agent_spec": AgentSpec(
+                        agent_id="planner",
+                        role="planner",
+                        persona="task-decomposer",
+                        capability="task-planning",
+                        tier="consultant",
+                        depth=0,
+                        target_profile="default",
+                        output_contract="work-pack-v1",
+                    ).to_dict(),
+                    "input_contract": "dag-spec-v1",
+                    "output_contract": "work-pack-v1",
+                    "success_criteria": ["tasks"],
+                },
+                {
+                    "id": "researcher",
+                    "agent_spec": AgentSpec(
+                        agent_id="researcher",
+                        role="worker",
+                        persona="fact-finder",
+                        capability="research",
+                        tier="investigator",
+                        depth=0,
+                        target_profile="default",
+                        output_contract="evidence-pack-v1",
+                    ).to_dict(),
+                    "input_contract": "work-pack-v1",
+                    "output_contract": "evidence-pack-v1",
+                    "success_criteria": ["sources", "claims"],
+                },
+                {
+                    "id": "executor",
+                    "agent_spec": AgentSpec(
+                        agent_id="executor",
+                        role="worker",
+                        persona="code-implementer",
+                        capability="implementation",
+                        tier="executor",
+                        depth=0,
+                        target_profile="default",
+                        output_contract="diff-pack-v1",
+                    ).to_dict(),
+                    "input_contract": "work-pack-v1",
+                    "output_contract": "diff-pack-v1",
+                    "success_criteria": ["files_changed", "commands_run"],
+                },
+                {
+                    "id": "reviewer",
+                    "agent_spec": AgentSpec(
+                        agent_id="reviewer",
+                        role="verifier",
+                        persona="strict-reviewer",
+                        capability="review",
+                        tier="verifier",
+                        depth=0,
+                        target_profile="default",
+                        output_contract="review-report-v1",
+                    ).to_dict(),
+                    "input_contract": "diff-pack-v1",
+                    "output_contract": "review-report-v1",
+                    "success_criteria": ["verdict", "evidence"],
+                },
+                {
+                    "id": "synthesizer",
+                    "agent_spec": AgentSpec(
+                        agent_id="synthesizer",
+                        role="synthesizer",
+                        persona="final-merger",
+                        capability="summary",
+                        tier="summarizer",
+                        depth=0,
+                        target_profile="default",
+                        output_contract="summary-v1",
+                    ).to_dict(),
+                    "input_contract": "review-report-v1",
+                    "output_contract": "summary-v1",
+                    "success_criteria": ["summary", "next_action"],
+                },
+            ],
+        }
+
+        orchestrator = WorkflowOrchestrator(
+            delegate_fn=delegate_task,
+            persist_fn=lambda node_id, result: None,
+            load_fn=lambda node_id: None,
+            on_node_start=_on_node_start,
+            on_node_done=_on_node_done,
+        )
+
+        try:
+            final = orchestrator.run(dag, {"task": task})
+            response = final.get("summary", "") if isinstance(final, dict) else str(final)
+
+            if response:
+                await adapter.send(
+                    source.chat_id,
+                    f"🌟 Workflow complete (ID: {task_id})\n\n{response}",
+                    metadata=_thread_metadata,
+                )
+            else:
+                await adapter.send(
+                    source.chat_id,
+                    f"🌟 Workflow complete (ID: {task_id})\n(No summary generated)",
+                    metadata=_thread_metadata,
+                )
+        except Exception as e:
+            logger.exception("Workflow %s failed", task_id)
+            try:
+                await adapter.send(
+                    source.chat_id,
+                    f"❌ Workflow {task_id} failed: {e}",
+                    metadata=_thread_metadata,
+                )
+            except Exception:
+                pass
 
     async def _prepare_inbound_message_text(
         self,
